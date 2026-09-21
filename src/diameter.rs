@@ -110,6 +110,143 @@ pub fn credit_request(
 }
 
 impl Message {
+    fn group(avp: &Avp) -> Result<Self> {
+        ensure!(avp.data.len() <= MAX_FRAME - 20, "group too large");
+        let mut bytes = vec![1, 0, 0, 0, 0, 0, 0, 0];
+        bytes.resize(20, 0);
+        bytes.extend_from_slice(&avp.data);
+        let n = bytes.len();
+        bytes[1..4].copy_from_slice(&[(n >> 16) as u8, (n >> 8) as u8, n as u8]);
+        Self::decode(&bytes)
+    }
+
+    fn text(&self, code: u32) -> Result<String> {
+        let a = self
+            .unique(code)?
+            .ok_or_else(|| anyhow::anyhow!("missing text AVP"))?;
+        ensure!(
+            !a.data.is_empty() && a.data.len() <= 255,
+            "invalid text AVP"
+        );
+        Ok(std::str::from_utf8(&a.data)?.to_owned())
+    }
+
+    /// Strict simulator profile: one MSISDN, single-service seconds, no MSCC.
+    pub fn imscap_request(&self) -> Result<crate::charging::Ccr> {
+        use crate::charging::{Ccr, RequestType};
+        ensure!(
+            self.command == 272
+                && self.application == 4
+                && self.flags & 0x80 != 0
+                && self.flags & 0x20 == 0,
+            "not a CCR"
+        );
+        let allowed = [
+            263, 264, 296, 283, 293, 258, 461, 416, 415, 443, 446, 437, 295,
+        ];
+        for a in &self.avps {
+            ensure!(
+                a.vendor.is_none() && allowed.contains(&a.code),
+                "unsupported simulator AVP"
+            );
+            self.unique(a.code)?;
+        }
+        ensure!(self.integer(258)? == 4, "wrong application");
+        for code in [264, 296, 283, 461] {
+            self.text(code)?;
+        }
+        let kind = match self.integer(416)? {
+            1 => RequestType::Initial,
+            2 => RequestType::Update,
+            3 => RequestType::Termination,
+            _ => anyhow::bail!("unsupported request type"),
+        };
+        let sub = Self::group(
+            self.unique(443)?
+                .ok_or_else(|| anyhow::anyhow!("missing subscriber"))?,
+        )?;
+        ensure!(
+            sub.avps.len() == 2 && sub.integer(450)? == 0,
+            "expected one MSISDN"
+        );
+        let units = |code| -> Result<u32> {
+            let group = Self::group(
+                self.unique(code)?
+                    .ok_or_else(|| anyhow::anyhow!("missing units"))?,
+            )?;
+            ensure!(group.avps.len() == 1, "only CC-Time supported");
+            group.integer(420)
+        };
+        let used_seconds = if kind == RequestType::Initial {
+            ensure!(self.unique(446)?.is_none(), "initial usage unsupported");
+            0
+        } else {
+            units(446)?
+        };
+        let requested_seconds = if kind == RequestType::Termination {
+            ensure!(self.unique(437)?.is_none(), "termination requests units");
+            self.integer(295)?;
+            0
+        } else {
+            units(437)?
+        };
+        Ok(Ccr {
+            session_id: self.text(263)?,
+            subscriber: sub.text(444)?,
+            number: self.integer(415)?,
+            kind,
+            used_seconds,
+            requested_seconds,
+        })
+    }
+
+    /// Encode an IMSCAP decision using this CCR's transport correlation identifiers.
+    pub fn imscap_answer(
+        &self,
+        action: &crate::imscap::Action,
+        host: &str,
+        realm: &str,
+    ) -> Result<Self> {
+        let request = self.imscap_request()?;
+        let crate::imscap::Action::Answer {
+            number,
+            kind,
+            result,
+            seconds,
+        } = action
+        else {
+            anyhow::bail!("not an answer")
+        };
+        ensure!(
+            *number == request.number && *kind == request.kind,
+            "answer correlation mismatch"
+        );
+        ensure!(
+            !host.is_empty() && host.len() <= 255 && !realm.is_empty() && realm.len() <= 255,
+            "invalid origin"
+        );
+        let mut avps = vec![
+            Avp::octets(263, request.session_id.into_bytes()),
+            Avp::octets(264, host.as_bytes()),
+            Avp::octets(296, realm.as_bytes()),
+            Avp::number(258, 4),
+            Avp::number(416, *kind as u32),
+            Avp::number(415, *number),
+            Avp::number(268, *result),
+        ];
+        if *seconds > 0 {
+            avps.push(Avp::grouped(431, vec![Avp::number(420, *seconds)])?);
+        }
+        Ok(Self {
+            flags: self.flags & 0x40,
+            command: 272,
+            application: 4,
+            hop: self.hop,
+            end: self.end,
+            avps,
+        })
+    }
+
     fn unique(&self, code: u32) -> Result<Option<&Avp>> {
         let mut matches = self
             .avps

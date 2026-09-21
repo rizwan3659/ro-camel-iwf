@@ -3,7 +3,7 @@ name = "ro-camel-iwf"
 version = "0.1.0"
 edition = "2024"
 publish = false
-description = "Experimental durable CAMEL-to-Diameter charging interworking core"
+description = "Experimental Rust IMSCAP Diameter Ro to CAMEL interworking"
 
 [workspace]
 
@@ -19,4 +19,3 @@ tempfile = "3"
 [profile.release]
 lto = "thin"
 codegen-units = 1
-
