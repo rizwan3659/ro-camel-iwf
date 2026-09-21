@@ -22,6 +22,8 @@ The state machine rejects out-of-sequence requests, overlapping requests, excess
 
 See [the simulator profile and remaining implementation](docs/imscap-profile.md). The chosen AVP subset is a lab profile; no vendor interoperability or full Ro/CAP conformance is claimed.
 
+The [engineering interview guide](docs/interview-guide.md) explains the call flow, proposed production architecture, failure cases and evidence needed for deployment.
+
 ## Performance and availability
 
 High load and high availability are requirements, not measured properties of this milestone. IMSCAP needs persistent replay handling, bounded dispatch, protocol timers, replicated ownership and failure testing before deployment.
